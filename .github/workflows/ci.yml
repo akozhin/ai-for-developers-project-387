@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: api/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            api/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd api && pnpm install --frozen-lockfile && cd ../frontend && pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: make lint-api
+
+      - name: Generated files are up to date
+        run: make generate-check
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: cal
+          POSTGRES_PASSWORD: cal
+          POSTGRES_DB: cal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cal"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: cd backend && uv sync --dev --frozen
+
+      - name: Lint
+        run: make lint-backend
+
+      - name: Typecheck
+        run: make typecheck-backend
+
+      - name: Test
+        run: make test-backend
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: make lint-frontend
+
+      - name: Typecheck
+        run: make typecheck-frontend
+
+      - name: Test
+        run: make test-frontend
+
+      - name: Build
+        run: make build
+
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t cal-app .
+
+      - name: Container starts on PORT and answers
+        run: |
+          docker run -d --name cal-app -e PORT=8123 -p 8123:8123 cal-app
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:8123/health && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8123/health
+          curl -fsS -o home.html http://localhost:8123/
+          curl -fsS -o admin.html http://localhost:8123/admin
+          grep -qi "<html" home.html
+          grep -qi "<html" admin.html
+
+      - name: Container logs
+        if: failure()
+        run: docker logs cal-app
